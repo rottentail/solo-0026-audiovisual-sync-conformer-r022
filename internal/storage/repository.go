@@ -147,18 +147,6 @@ func (r *Repository) ReadTakeMedia(id string) ([]byte, []byte, error) {
 }
 
 func (r *Repository) GetAnalysis(id string) (domain.SyncAnalysis, error) {
-	var reference analysisReference
-	if err := readJSON(r.analysisPath(id), &reference); err == nil && reference.DecisionKey != "" {
-		var decision domain.SyncAnalysis
-		if err := readJSON(r.currentAnalysisPath(reference.DecisionKey), &decision); err != nil {
-			return domain.SyncAnalysis{}, fmt.Errorf("read analysis decision: %w", err)
-		}
-		decision.ID = reference.ID
-		decision.TakeID = reference.TakeID
-		decision.Policy = reference.Policy
-		decision.CreatedAt = reference.CreatedAt
-		return decision, nil
-	}
 	var record domain.SyncAnalysis
 	if err := readJSON(r.analysisPath(id), &record); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -219,83 +207,12 @@ func (r *Repository) UpdateAnalysis(record domain.SyncAnalysis) error {
 	return r.writeAnalysis(record)
 }
 
+// writeAnalysis persists the record under the analysis identifier only. Each
+// analysis keeps its own decision; no per-take shared state is published, so
+// a later re-analysis can never rewrite the terminal record of an earlier
+// analysis regardless of completion order.
 func (r *Repository) writeAnalysis(record domain.SyncAnalysis) error {
-	lock := r.locks.forKey("decision:" + record.TakeID)
-	lock.Lock()
-	defer lock.Unlock()
-	var history analysisHistory
-	if err := readJSON(r.analysisHistoryPath(record.ID), &history); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("read analysis history: %w", err)
-		}
-		history.Identity = analysisReference{
-			ID: record.ID, TakeID: record.TakeID, Policy: record.Policy, CreatedAt: record.CreatedAt,
-		}
-	}
-	state, err := json.Marshal(record)
-	if err != nil {
-		return fmt.Errorf("encode analysis event: %w", err)
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(state, &fields); err != nil {
-		return fmt.Errorf("split analysis event: %w", err)
-	}
-	for _, key := range []string{"id", "take_id", "policy", "created_at"} {
-		delete(fields, key)
-	}
-	for _, key := range []string{"audio_event_ms", "video_event_ms", "offset_ms", "confidence", "drift_ppm", "audio_prominence", "video_prominence"} {
-		if value, exists := fields[key]; exists {
-			history.Events = append(history.Events, map[string]json.RawMessage{key: value})
-			delete(fields, key)
-		}
-	}
-	history.Events = append(history.Events, fields)
-	if err := writeJSON(r.analysisHistoryPath(record.ID), history); err != nil {
-		return fmt.Errorf("write analysis history: %w", err)
-	}
-	if err := writeJSON(r.currentAnalysisPath(record.TakeID), record); err != nil {
-		return fmt.Errorf("publish analysis decision: %w", err)
-	}
-	reference := analysisReference{
-		ID: record.ID, TakeID: record.TakeID, Policy: record.Policy,
-		CreatedAt: record.CreatedAt, DecisionKey: record.TakeID,
-	}
-	return writeJSON(r.analysisPath(record.ID), reference)
-}
-
-type analysisReference struct {
-	ID          string            `json:"id"`
-	TakeID      string            `json:"take_id"`
-	Policy      domain.SyncPolicy `json:"policy"`
-	CreatedAt   time.Time         `json:"created_at"`
-	DecisionKey string            `json:"decision_key"`
-}
-
-type analysisHistory struct {
-	Identity analysisReference            `json:"identity"`
-	Events   []map[string]json.RawMessage `json:"events"`
-}
-
-func (r *Repository) analysisHistoryPath(id string) string {
-	return filepath.Join(r.root, "analyses", "history", id+".json")
-}
-
-func (r *Repository) currentAnalysisPath(takeID string) string {
-	return filepath.Join(r.root, "analyses", "current", takeID+".json")
-}
-
-func (r *Repository) LatestAnalysisForTake(takeID string) (domain.SyncAnalysis, error) {
-	if err := domain.ValidateIdentifier("take_id", takeID); err != nil {
-		return domain.SyncAnalysis{}, err
-	}
-	var record domain.SyncAnalysis
-	if err := readJSON(r.currentAnalysisPath(takeID), &record); err != nil {
-		return domain.SyncAnalysis{}, fmt.Errorf("read current analysis: %w", err)
-	}
-	if record.TakeID != takeID {
-		return domain.SyncAnalysis{}, fmt.Errorf("current analysis belongs to a different take")
-	}
-	return record, nil
+	return writeJSON(r.analysisPath(record.ID), record)
 }
 
 func (r *Repository) GetConform(id string) (domain.ConformJob, error) {

@@ -316,28 +316,9 @@ func (s *Service) ReadConformBundle(id string) ([]byte, domain.ConformReceipt, e
 	if err := domain.ValidateIdentifier("conform_id", id); err != nil {
 		return nil, domain.ConformReceipt{}, err
 	}
-	job, err := s.repository.GetConform(id)
-	if err != nil {
-		return nil, domain.ConformReceipt{}, err
-	}
-	if job.State == domain.ConformStateCompleted {
-		decision, err := s.repository.LatestAnalysisForTake(job.TakeID)
-		if err != nil {
-			return nil, domain.ConformReceipt{}, domain.NewError(
-				"conform_decision_unavailable", 409, "current sync decision is unavailable: %s", err,
-			)
-		}
-		if decision.State != domain.AnalysisStateReady || decision.OffsetMS == nil {
-			return nil, domain.ConformReceipt{}, domain.NewError(
-				"conform_decision_unavailable", 409, "current sync decision is not ready",
-			)
-		}
-		if *decision.OffsetMS != job.MeasuredOffsetMS {
-			return nil, domain.ConformReceipt{}, domain.NewError(
-				"conform_decision_changed", 409, "current sync decision differs from this conform",
-			)
-		}
-	}
+	// A completed job serves the bundle it committed. The receipt inside the
+	// bundle records the analysis and offset the job was generated from, so
+	// later re-analyses of the same take must not gate or alter the download.
 	return s.repository.ReadConformBundle(id)
 }
 
